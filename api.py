@@ -1,5 +1,3 @@
-# api.py
-
 import base64
 import io
 from fastapi import FastAPI, HTTPException
@@ -16,7 +14,7 @@ app = FastAPI()
 # Allow CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change to specific domains in production
+    allow_origins=["*"],  # Change this in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -103,13 +101,11 @@ def predict(payload: PredictionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Lightweight health-check for uptime monitors
 @app.get("/")
 def health_check():
     return {"status": "alive"}
-    
-# For local testing
+
+# Local run
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=10000)
-    @app.get("/")
-
-
