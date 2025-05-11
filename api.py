@@ -28,7 +28,7 @@ h5_model_path = f"{cnn_name}_steno_model.h5"
 pkl_path = f"{cnn_name}_embeddings_and_indices.pkl"
 MIN_KNN_SIM = 0.93
 
-model = load_model(h5_model_path)
+model = load_model(h5_model_path, compile=False)
 emb_model = Model(inputs=model.inputs, outputs=model.get_layer("embedding_layer").output)
 
 with open(pkl_path, "rb") as f:
