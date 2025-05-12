@@ -23,7 +23,7 @@ TOP_K         = 5
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # adjust in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -35,28 +35,10 @@ emb_model = Model(inputs=model.inputs, outputs=model.get_layer("embedding_layer"
 
 with open(pkl_path, "rb") as f:
     data = pickle.load(f)
-
 class_indices = data["class_indices"]
 records       = data["records"]
 
-equivalents = {
-    "a": ["a", "an"], "an": ["a", "an"],
-    "are": ["are", "our", "hour"], "our": ["are", "our", "hour"], "hour": ["are", "our", "hour"],
-    "at": ["at", "it"], "it": ["at", "it"],
-    "be": ["be", "by"], "by": ["be", "by"],
-    "correspond": ["correspond", "correspondence"], "correspondence": ["correspond", "correspondence"],
-    "ever": ["ever", "every"], "every": ["ever", "every"],
-    "important": ["important", "importance"], "importance": ["important", "importance"],
-    "in": ["in", "not"], "not": ["in", "not"],
-    "is": ["is", "his"], "his": ["is", "his"],
-    "publish": ["publish", "publication"], "publication": ["publish", "publication"],
-    "satisfy": ["satisfy", "satisfactory"], "satisfactory": ["satisfy", "satisfactory"],
-    "their": ["their", "there"], "there": ["their", "there"],
-    "thing": ["thing", "think"], "think": ["thing", "think"],
-    "well": ["well", "will"], "will": ["well", "will"],
-    "won": ["won", "one"], "one": ["won", "one"],
-    "you": ["you", "your"], "your": ["you", "your"],
-}
+equivalents = { … }  # your existing dict
 
 def is_equivalent(expected: str, predicted: str) -> bool:
     return (
@@ -65,8 +47,26 @@ def is_equivalent(expected: str, predicted: str) -> bool:
     )
 
 # ─── IMAGE PREPROCESSING ───────────────────────────────────────────────────────
+def composite_on_white(img: Image.Image) -> Image.Image:
+    """
+    Ensure we have an RGB image with white background.
+    """
+    # If already RGB with no alpha, just return
+    if img.mode == "RGB":
+        return img
+    # Convert paletted or L to RGBA first to handle transparency properly
+    img = img.convert("RGBA")
+    # Create white background
+    bg = Image.new("RGB", img.size, (255, 255, 255))
+    # Paste the RGBA image onto white bg using alpha channel as mask
+    bg.paste(img, mask=img.split()[3])
+    return bg
+
 def preprocess_image(img: Image.Image) -> np.ndarray:
-    img = img.convert("RGB")
+    """
+    Composite onto white, resize to 224×224, and normalize to [0,1].
+    """
+    img = composite_on_white(img)
     img = img.resize((224, 224), Image.LANCZOS)
     arr = np.asarray(img, dtype="float32") / 255.0
     return np.expand_dims(arr, 0)
@@ -104,11 +104,12 @@ def predict(payload: PredictionRequest):
         best_score, best_label = sims[0]
 
         return {
-            "expected_word": payload.expected_word,
-            "predicted_word": best_label,
-            "similarity_score": round(best_score, 4),
-            "top_5": top_matches
+            "expected_word":     payload.expected_word,
+            "predicted_word":    best_label,
+            "similarity_score":  round(best_score, 4),
+            "top_5":             top_matches
         }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -133,7 +134,6 @@ def batch_predict(images_dir: str = Query(..., description="Directory of PNG ima
         emb_q_n = l2_normalize(emb_q)
 
         raw = [(float(np.dot(emb_q_n, rec["emb"])), rec["label"]) for rec in records]
-        # keep best sim per label
         best_map = {}
         for sim, lbl in raw:
             if lbl not in best_map or sim > best_map[lbl]:
