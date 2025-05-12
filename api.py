@@ -38,7 +38,23 @@ with open(pkl_path, "rb") as f:
 class_indices = data["class_indices"]
 records       = data["records"]
 
-equivalents = { … }  # your existing dict
+equivalents = {  
+    "a": ["a", "an"], "an": ["a", "an"],
+    "are": ["are", "our", "hour"], "our": ["are", "our", "hour"], "hour": ["are", "our", "hour"],
+    "at": ["at", "it"], "it": ["at", "it"],
+    "be": ["be", "by"], "by": ["be", "by"],
+    "correspond": ["correspond", "correspondence"], "correspondence": ["correspond", "correspondence"],
+    "ever": ["ever", "every"], "every": ["ever", "every"],
+    "important": ["important", "importance"], "importance": ["important", "importance"],
+    "in": ["in", "not"], "not": ["in", "not"],
+    "is": ["is", "his"], "his": ["is", "his"],
+    "publish": ["publish", "publication"], "publication": ["publish", "publication"],
+    "satisfy": ["satisfy", "satisfactory"], "satisfactory": ["satisfy", "satisfactory"],
+    "their": ["their", "there"], "there": ["their", "there"],
+    "thing": ["thing", "think"], "think": ["thing", "think"],
+    "well": ["well", "will"], "will": ["well", "will"],
+    "won": ["won", "one"], "one": ["won", "one"],
+    "you": ["you", "your"], "your": ["you", "your"],}  
 
 def is_equivalent(expected: str, predicted: str) -> bool:
     return (
