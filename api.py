@@ -11,7 +11,6 @@ from pydantic import BaseModel
 from PIL import Image
 from tensorflow.keras.models import load_model, Model
 import uvicorn
-from tqdm import tqdm
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 cnn_name      = "MobileNetV2"
@@ -39,7 +38,6 @@ with open(pkl_path, "rb") as f:
 
 class_indices = data["class_indices"]
 records       = data["records"]
-all_labels    = list(class_indices.keys())
 
 equivalents = {
     "a": ["a", "an"], "an": ["a", "an"],
@@ -62,13 +60,12 @@ equivalents = {
 
 def is_equivalent(expected: str, predicted: str) -> bool:
     return (
-        expected == predicted
+        predicted == expected
         or (expected in equivalents and predicted in equivalents[expected])
     )
 
 # ─── IMAGE PREPROCESSING ───────────────────────────────────────────────────────
 def preprocess_image(img: Image.Image) -> np.ndarray:
-    """Resize RGB to 224×224 and normalize to [0,1]."""
     img = img.convert("RGB")
     img = img.resize((224, 224), Image.LANCZOS)
     arr = np.asarray(img, dtype="float32") / 255.0
@@ -87,12 +84,12 @@ def l2_normalize(vec: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(vec)
     return vec / norm if norm > 1e-10 else vec
 
-# ─── REQUEST MODELS ────────────────────────────────────────────────────────────
+# ─── REQUEST MODEL ─────────────────────────────────────────────────────────────
 class PredictionRequest(BaseModel):
     image: str
     expected_word: str
 
-# ─── SINGLE IMAGE ENDPOINT ─────────────────────────────────────────────────────
+# ─── SINGLE-IMAGE ENDPOINT ─────────────────────────────────────────────────────
 @app.post("/predict")
 def predict(payload: PredictionRequest):
     try:
@@ -100,12 +97,10 @@ def predict(payload: PredictionRequest):
         emb_q = emb_model.predict(x, verbose=0)[0]
         emb_q_n = l2_normalize(emb_q)
 
-        sims = [(float(np.dot(emb_q_n, rec["emb"])), rec["label"])
-                for rec in records]
+        sims = [(float(np.dot(emb_q_n, rec["emb"])), rec["label"]) for rec in records]
         sims.sort(key=lambda t: t[0], reverse=True)
 
-        top_matches = [{"word": lbl, "score": round(score, 4)}
-                       for score, lbl in sims[:TOP_K]]
+        top_matches = [{"word": lbl, "score": round(score, 4)} for score, lbl in sims[:TOP_K]]
         best_score, best_label = sims[0]
 
         return {
@@ -114,22 +109,18 @@ def predict(payload: PredictionRequest):
             "similarity_score": round(best_score, 4),
             "top_5": top_matches
         }
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ─── BATCH IMAGE ENDPOINT ──────────────────────────────────────────────────────
+# ─── BATCH-IMAGE ENDPOINT ──────────────────────────────────────────────────────
 @app.get("/batch_predict")
-def batch_predict(
-    images_dir: str = Query(..., description="Directory of PNG images"),
-    report_name: Optional[str] = Query(None, description="(unused)"),
-):
+def batch_predict(images_dir: str = Query(..., description="Directory of PNG images")):
     if not os.path.isdir(images_dir):
         raise HTTPException(status_code=404, detail="Directory not found")
 
     total = correct1 = correct_k = 0
 
-    for fname in tqdm(sorted(os.listdir(images_dir)), desc="Batch Testing"):
+    for fname in sorted(os.listdir(images_dir)):
         if not fname.lower().endswith(".png"):
             continue
 
@@ -141,8 +132,7 @@ def batch_predict(
         emb_q = emb_model.predict(x, verbose=0)[0]
         emb_q_n = l2_normalize(emb_q)
 
-        raw = [(float(np.dot(emb_q_n, rec["emb"])), rec["label"])
-               for rec in records]
+        raw = [(float(np.dot(emb_q_n, rec["emb"])), rec["label"]) for rec in records]
         # keep best sim per label
         best_map = {}
         for sim, lbl in raw:
@@ -150,7 +140,7 @@ def batch_predict(
                 best_map[lbl] = sim
         sims = sorted(best_map.items(), key=lambda x: x[1], reverse=True)
 
-        best_lbl, best_sim = sims[0][0], sims[0][1]
+        best_lbl, best_sim = sims[0]
         top_labels = [lbl for lbl, _ in sims[:TOP_K]]
 
         ok1 = (best_sim >= MIN_KNN_SIM) and is_equivalent(expected, best_lbl)
