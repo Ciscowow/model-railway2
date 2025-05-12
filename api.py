@@ -10,15 +10,15 @@ from tensorflow.keras.models import load_model, Model
 import uvicorn
 import os
 
-# Reduce TensorFlow logging noise
+# Suppress TensorFlow warnings
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 app = FastAPI()
 
-# Enable CORS (adjust for production)
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Replace with frontend domain in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,12 +39,12 @@ with open(pkl_path, "rb") as f:
 class_indices = data["class_indices"]
 records = data["records"]
 
-# API schema
+# Request body
 class PredictionRequest(BaseModel):
     image: str
     expected_word: str
 
-# === Preprocess React Native input ===
+# Preprocess input image
 def preprocess_base64(base64_str):
     image_data = base64.b64decode(base64_str)
     image = Image.open(io.BytesIO(image_data)).convert("L")
@@ -55,7 +55,7 @@ def preprocess_base64(base64_str):
     image = ImageOps.pad(image, (224, 224), method=Image.LANCZOS, color=0)
     image = image.convert("RGB")
 
-    # Save for debugging (optional)
+    # Save preprocessed image for debugging
     image.save("last_processed.png")
 
     arr = np.array(image).astype("float32") / 255.0
@@ -68,29 +68,37 @@ def l2_normalize(vec):
 @app.post("/predict")
 def predict(payload: PredictionRequest):
     try:
+        # Preprocess and embed the input
         x = preprocess_base64(payload.image)
         emb_q = emb_model.predict(x, verbose=0)[0]
         emb_q_n = l2_normalize(emb_q)
 
+        # Calculate similarities
         sims = [(float(np.dot(emb_q_n, rec["emb"])), rec["label"]) for rec in records]
         sims.sort(key=lambda t: t[0], reverse=True)
+
+        top_matches = [
+            {"word": label, "score": round(score, 4)}
+            for score, label in sims[:5]
+        ]
 
         best_score, best_label = sims[0]
 
         return {
             "expected_word": payload.expected_word,
             "predicted_word": best_label,
-            "similarity_score": round(best_score, 4)
+            "similarity_score": round(best_score, 4),
+            "top_5": top_matches
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Health check for uptime robots
+# Health check
 @app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "alive"}
 
-# Local run
+# For local run
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=10000)
