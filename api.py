@@ -8,19 +8,23 @@ import numpy as np
 import pickle
 from tensorflow.keras.models import load_model, Model
 import uvicorn
+import os
+
+# Reduce TensorFlow logging noise
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 app = FastAPI()
 
-# Enable CORS for frontend access
+# Enable CORS (adjust for production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load model and embedding layer
+# Load model and embeddings
 cnn_name = "MobileNetV2"
 h5_model_path = f"{cnn_name}_steno_model.h5"
 pkl_path = f"{cnn_name}_embeddings_and_indices.pkl"
@@ -34,55 +38,32 @@ with open(pkl_path, "rb") as f:
 
 class_indices = data["class_indices"]
 records = data["records"]
-all_labels = list(class_indices.keys())
 
-# Word equivalence map
-equivalents = {
-    "a": ["a", "an"], "an": ["a", "an"],
-    "are": ["are", "our", "hour"], "our": ["are", "our", "hour"], "hour": ["are", "our", "hour"],
-    "at": ["at", "it"], "it": ["at", "it"],
-    "be": ["be", "by"], "by": ["be", "by"],
-    "correspond": ["correspond", "correspondence"], "correspondence": ["correspond", "correspondence"],
-    "ever": ["ever", "every"], "every": ["ever", "every"],
-    "important": ["important", "importance"], "importance": ["important", "importance"],
-    "in": ["in", "not"], "not": ["in", "not"],
-    "is": ["is", "his"], "his": ["is", "his"],
-    "publish": ["publish", "publication"], "publication": ["publish", "publication"],
-    "satisfy": ["satisfy", "satisfactory"], "satisfactory": ["satisfy", "satisfactory"],
-    "their": ["their", "there"], "there": ["their", "there"],
-    "thing": ["thing", "think"], "think": ["thing", "think"],
-    "well": ["well", "will"], "will": ["well", "will"],
-    "won": ["won", "one"], "one": ["won", "one"],
-    "you": ["you", "your"], "your": ["you", "your"],
-}
-
+# API schema
 class PredictionRequest(BaseModel):
     image: str
     expected_word: str
 
-# ⬇️ Enhanced preprocessing for canvas input
+# === Preprocess React Native input ===
 def preprocess_base64(base64_str):
     image_data = base64.b64decode(base64_str)
-    image = Image.open(io.BytesIO(image_data)).convert("L")  # Convert to grayscale
+    image = Image.open(io.BytesIO(image_data)).convert("L")
 
-    # Save input for inspection (optional)
-    with open("debug_input.png", "wb") as f:
-        f.write(base64.b64decode(base64_str))
-
-    image = ImageOps.invert(image)  # Make stroke white on black
-    image = ImageOps.pad(image, (224, 224), method=Image.LANCZOS, color=0)  # Center pad to 224x224
+    image = ImageOps.invert(image)
+    image = ImageOps.autocontrast(image)
+    image = ImageOps.crop(image)
+    image = ImageOps.pad(image, (224, 224), method=Image.LANCZOS, color=0)
     image = image.convert("RGB")
+
+    # Save for debugging (optional)
+    image.save("last_processed.png")
+
     arr = np.array(image).astype("float32") / 255.0
     return np.expand_dims(arr, 0)
 
 def l2_normalize(vec):
     norm = np.linalg.norm(vec)
     return vec / norm if norm > 1e-10 else vec
-
-def is_equivalent(expected, predicted):
-    expected = expected.lower().strip()
-    predicted = predicted.lower().strip()
-    return predicted == expected or predicted in equivalents.get(expected, [])
 
 @app.post("/predict")
 def predict(payload: PredictionRequest):
@@ -95,23 +76,21 @@ def predict(payload: PredictionRequest):
         sims.sort(key=lambda t: t[0], reverse=True)
 
         best_score, best_label = sims[0]
-        matched = is_equivalent(payload.expected_word, best_label)
 
         return {
             "expected_word": payload.expected_word,
             "predicted_word": best_label,
-            "similarity_score": round(best_score, 4),
-            "match": matched
+            "similarity_score": round(best_score, 4)
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ✅ Health check for uptime monitors
+# Health check for uptime robots
 @app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "alive"}
 
-# For local testing
+# Local run
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=10000)
