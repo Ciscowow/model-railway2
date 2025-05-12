@@ -24,7 +24,7 @@ app.add_middleware(
 cnn_name = "MobileNetV2"
 h5_model_path = f"{cnn_name}_steno_model.h5"
 pkl_path = f"{cnn_name}_embeddings_and_indices.pkl"
-MIN_KNN_SIM = 0.93
+MIN_KNN_SIM = 0.95
 
 model = load_model(h5_model_path, compile=False)
 emb_model = Model(inputs=model.inputs, outputs=model.get_layer("embedding_layer").output)
