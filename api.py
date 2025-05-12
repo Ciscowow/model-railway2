@@ -28,7 +28,7 @@ app.add_middleware(
 )
 
 # ─── Load Model and Prototypes ────────────────────────────────────────────────
-cnn_name = "ResNet50"
+cnn_name = "MobileNetV2"
 h5_model_path = f"{cnn_name}_steno_model.h5"
 pkl_path = f"{cnn_name}_embeddings_and_indices.pkl"
 MIN_KNN_SIM = 0.93
