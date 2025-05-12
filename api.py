@@ -2,16 +2,15 @@ import base64
 import io
 import os
 import pickle
-from typing import Optional
+from typing import List
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image, ImageOps
 from tensorflow.keras.models import load_model, Model
 import uvicorn
-from tqdm import tqdm
 
 # Suppress TensorFlow warnings
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -21,30 +20,26 @@ app = FastAPI()
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change this in production
+    allow_origins=["*"],  # tighten in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ─── Load Model and Prototypes ────────────────────────────────────────────────
-cnn_name = "MobileNetV2"
+cnn_name     = "MobileNetV2"
 h5_model_path = f"{cnn_name}_steno_model.h5"
-pkl_path = f"{cnn_name}_embeddings_and_indices.pkl"
-MIN_KNN_SIM = 0.93
-TOP_K = 5
+pkl_path     = f"{cnn_name}_embeddings_and_indices.pkl"
+MIN_KNN_SIM  = 0.93
 
-model = load_model(h5_model_path, compile=False)
+model     = load_model(h5_model_path, compile=False)
 emb_model = Model(inputs=model.inputs, outputs=model.get_layer("embedding_layer").output)
 
 with open(pkl_path, "rb") as f:
     data = pickle.load(f)
-
-class_indices = data["class_indices"]
 records = data["records"]
-all_labels = list(class_indices.keys())
 
-# ─── Equivalence Handling ──────────────────────────────────────────────────────
+# ─── Equivalence Handling (unchanged) ─────────────────────────────────────────
 equivalents = {
     "a": ["a", "an"], "an": ["a", "an"],
     "are": ["are", "our", "hour"], "our": ["are", "our", "hour"], "hour": ["are", "our", "hour"],
@@ -64,141 +59,103 @@ equivalents = {
     "you": ["you", "your"], "your": ["you", "your"],
 }
 
-def is_equivalent(expected, predicted):
-    if expected is None:
-        return False
-    return expected == predicted or predicted in equivalents.get(expected, [])
+def is_equivalent(expected: str, predicted: str) -> bool:
+    return (expected == predicted) or (predicted in equivalents.get(expected, []))
 
-# ─── Request Model ─────────────────────────────────────────────────────────────
+
+# ─── Request / Response Models ────────────────────────────────────────────────
 class PredictionRequest(BaseModel):
-    image: str
+    image: str           # base64-encoded PNG/JPG
     expected_word: str
 
+class PredictionResponse(BaseModel):
+    expected_word: str
+    predicted_word: str
+    similarity_score: float  # cosine similarity [0–1]
+
+
+class BatchRequest(BaseModel):
+    items: List[PredictionRequest]
+
+class BatchResponse(BaseModel):
+    results: List[PredictionResponse]
+
+
 # ─── Utility Functions ─────────────────────────────────────────────────────────
-def preprocess_base64(base64_str):
-    image_data = base64.b64decode(base64_str)
-    image = Image.open(io.BytesIO(image_data)).convert("L")
-    image = ImageOps.invert(image)
-    image = ImageOps.autocontrast(image)
-    image = ImageOps.crop(image)
-    image = ImageOps.pad(image, (224, 224), method=Image.LANCZOS, color=0)
-    image = image.convert("RGB")
-    image.save("last_processed.png")
-    arr = np.array(image).astype("float32") / 255.0
+def preprocess_base64(b64: str) -> np.ndarray:
+    data = base64.b64decode(b64)
+    img = Image.open(io.BytesIO(data)).convert("L")
+    img = ImageOps.invert(img)
+    img = ImageOps.autocontrast(img)
+    img = ImageOps.crop(img)
+    img = ImageOps.pad(img, (224, 224), method=Image.LANCZOS, color=0)
+    img = img.convert("RGB")
+    arr = np.array(img, dtype="float32") / 255.0
     return np.expand_dims(arr, 0)
 
-def preprocess_path(path):
-    image = Image.open(path).convert("RGB")
-    image = image.resize((224, 224), resample=Image.LANCZOS)
-    arr = np.array(image).astype("float32") / 255.0
-    return np.expand_dims(arr, 0)
+def l2_normalize(v: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(v)
+    return v / n if n > 1e-12 else v
 
-def l2_normalize(vec):
-    norm = np.linalg.norm(vec)
-    return vec / norm if norm > 1e-10 else vec
 
 # ─── Endpoints ─────────────────────────────────────────────────────────────────
 
-@app.post("/predict")
-def predict(payload: PredictionRequest):
+@app.post("/predict", response_model=PredictionResponse)
+def predict_one(req: PredictionRequest):
     try:
-        x = preprocess_base64(payload.image)
-        emb_q = emb_model.predict(x, verbose=0)[0]
-        emb_q_n = l2_normalize(emb_q)
+        x = preprocess_base64(req.image)
+        emb = emb_model.predict(x, verbose=0)[0]
+        emb_n = l2_normalize(emb)
 
-        sims = [(float(np.dot(emb_q_n, rec["emb"])), rec["label"]) for rec in records]
+        # compute cosine scores
+        sims = [(float(np.dot(emb_n, rec["emb"])), rec["label"]) for rec in records]
         sims.sort(key=lambda t: t[0], reverse=True)
 
-        top_matches = [{"word": label, "score": round(score, 4)} for score, label in sims[:5]]
-        best_score, best_label = sims[0]
-
-        return {
-            "expected_word": payload.expected_word,
-            "predicted_word": best_label,
-            "similarity_score": round(best_score, 4),
-            "top_5": top_matches
-        }
+        score, label = sims[0]
+        return PredictionResponse(
+            expected_word=req.expected_word,
+            predicted_word=label,
+            similarity_score=round(score, 4)
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/batch_predict")
-def batch_predict(
-    images_dir: str = Query(..., description="Directory containing stroke images"),
-    report_name: Optional[str] = Query(None, description="Name for the output report file")
-):
-    if not os.path.exists(images_dir):
-        raise HTTPException(status_code=404, detail=f"Folder '{images_dir}' not found.")
 
-    total = correct1 = correct_k = 0
-    report_lines = []
+@app.post("/batch_predict", response_model=BatchResponse)
+def predict_batch(batch: BatchRequest):
+    results = []
+    for item in batch.items:
+        try:
+            x = preprocess_base64(item.image)
+            emb = emb_model.predict(x, verbose=0)[0]
+            emb_n = l2_normalize(emb)
 
-    for fname in tqdm(sorted(os.listdir(images_dir)), desc="Batch Testing"):
-        if not fname.lower().endswith(".png"):
-            continue
+            sims = [(float(np.dot(emb_n, rec["emb"])), rec["label"]) for rec in records]
+            sims.sort(key=lambda t: t[0], reverse=True)
 
-        total += 1
-        path = os.path.join(images_dir, fname)
-        base = os.path.splitext(fname)[0].lower()
-        expected = next((lbl for lbl in all_labels if lbl.lower() == base), None)
+            score, label = sims[0]
+            results.append(PredictionResponse(
+                expected_word=item.expected_word,
+                predicted_word=label,
+                similarity_score=round(score, 4)
+            ))
+        except Exception as e:
+            # on error, record a dummy failure
+            results.append(PredictionResponse(
+                expected_word=item.expected_word,
+                predicted_word="❌ error",
+                similarity_score=0.0
+            ))
 
-        x = preprocess_path(path)
-        emb_q = emb_model.predict(x, verbose=0)[0]
-        emb_q_n = l2_normalize(emb_q)
+    return BatchResponse(results=results)
 
-        raw = [(float(np.dot(emb_q_n, rec["emb"])), rec["label"]) for rec in records]
-        best_map = {}
-        for sim, lbl in raw:
-            if lbl not in best_map or sim > best_map[lbl]:
-                best_map[lbl] = sim
-        sims = sorted([(sim, lbl) for lbl, sim in best_map.items()], key=lambda x: x[0], reverse=True)
 
-        best_sim, best_lbl = sims[0]
-        top_labels = [lbl for sim, lbl in sims[:TOP_K]]
-        ok1 = (best_sim >= MIN_KNN_SIM) and is_equivalent(expected, best_lbl)
-        okK = any(is_equivalent(expected, lbl) for lbl in top_labels)
-
-        correct1 += int(ok1)
-        correct_k += int(okK)
-
-        rpt = [
-            f"Stroke Assessment for '{fname}'",
-            f"  Expected Word:     {expected or '❌ Not in classes'}",
-            f"  Predicted (Top-1): {best_lbl}",
-            f"  Cosine Sim:        {best_sim*100:.2f}%",
-            f"  Correct (Top-1):   {'✅' if ok1 else '❌'}",
-            f"  Correct (Top-{TOP_K}): {'✅' if okK else '❌'}",
-            "  Nearest Neighbors:"
-        ] + [f"    {lbl:<15} {sim*100:.2f}%" for sim, lbl in sims[:TOP_K]] + [""]
-
-        report_lines.extend(rpt)
-
-    summary = [
-        f"Batch Test Summary: {cnn_name}",
-        f"  Total images:        {total}",
-        f"  Top-1 correct (≥{int(MIN_KNN_SIM*100)}%): {correct1} ({correct1/total*100:.2f}%)",
-        f"  Top-{TOP_K} correct:  {correct_k} ({correct_k/total*100:.2f}%)",
-        f"  Top-1 misses:        {total - correct1} ({(total - correct1)/total*100:.2f}%)",
-        f"  Top-{TOP_K} misses:   {total - correct_k} ({(total - correct_k)/total*100:.2f}%)"
-    ]
-    report_lines.append("\n" + "\n".join(summary))
-
-    report_path = report_name or f"{cnn_name}_batch_report.txt"
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(report_lines))
-
-    return {
-        "status": "completed",
-        "total_images": total,
-        "top1_correct": correct1,
-        "topK_correct": correct_k,
-        "report_path": os.path.abspath(report_path)
-    }
-
-@app.api_route("/", methods=["GET", "HEAD"])
+@app.get("/", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "alive"}
 
-# ─── Local Run ────────────────────────────────────────────────────────────────
+
+# ─── Run Locally ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=10000)
