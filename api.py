@@ -3,7 +3,7 @@ import io
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from PIL import Image
+from PIL import Image, ImageOps
 import numpy as np
 import pickle
 from tensorflow.keras.models import load_model, Model
@@ -11,17 +11,17 @@ import uvicorn
 
 app = FastAPI()
 
-# Allow CORS for React frontend
+# Enable CORS for frontend access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with your domain in production
+    allow_origins=["*"],  # In production, replace with specific domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load model and data
-cnn_name = "MobileNetV2"
+# Load model and embedding layer
+cnn_name = "ResNet50"
 h5_model_path = f"{cnn_name}_steno_model.h5"
 pkl_path = f"{cnn_name}_embeddings_and_indices.pkl"
 MIN_KNN_SIM = 0.93
@@ -36,7 +36,7 @@ class_indices = data["class_indices"]
 records = data["records"]
 all_labels = list(class_indices.keys())
 
-# Word equivalences (synonyms or variants)
+# Word equivalence map
 equivalents = {
     "a": ["a", "an"], "an": ["a", "an"],
     "are": ["are", "our", "hour"], "our": ["are", "our", "hour"], "hour": ["are", "our", "hour"],
@@ -57,13 +57,21 @@ equivalents = {
 }
 
 class PredictionRequest(BaseModel):
-    image: str  # base64 string
+    image: str
     expected_word: str
 
+# ⬇️ Enhanced preprocessing for canvas input
 def preprocess_base64(base64_str):
     image_data = base64.b64decode(base64_str)
-    image = Image.open(io.BytesIO(image_data)).convert("RGB")
-    image = image.resize((224, 224), resample=Image.LANCZOS)
+    image = Image.open(io.BytesIO(image_data)).convert("L")  # Convert to grayscale
+
+    # Save input for inspection (optional)
+    with open("debug_input.png", "wb") as f:
+        f.write(base64.b64decode(base64_str))
+
+    image = ImageOps.invert(image)  # Make stroke white on black
+    image = ImageOps.pad(image, (224, 224), method=Image.LANCZOS, color=0)  # Center pad to 224x224
+    image = image.convert("RGB")
     arr = np.array(image).astype("float32") / 255.0
     return np.expand_dims(arr, 0)
 
@@ -99,7 +107,7 @@ def predict(payload: PredictionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ✅ Health check route for GET and HEAD requests
+# ✅ Health check for uptime monitors
 @app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "alive"}
