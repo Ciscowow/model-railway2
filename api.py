@@ -14,7 +14,7 @@ app = FastAPI()
 # Allow CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change this in production
+    allow_origins=["*"],  # Replace with your domain in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -79,12 +79,10 @@ def is_equivalent(expected, predicted):
 @app.post("/predict")
 def predict(payload: PredictionRequest):
     try:
-        # Preprocess image
         x = preprocess_base64(payload.image)
         emb_q = emb_model.predict(x, verbose=0)[0]
         emb_q_n = l2_normalize(emb_q)
 
-        # Find most similar
         sims = [(float(np.dot(emb_q_n, rec["emb"])), rec["label"]) for rec in records]
         sims.sort(key=lambda t: t[0], reverse=True)
 
@@ -101,11 +99,11 @@ def predict(payload: PredictionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Lightweight health-check for uptime monitors
-@app.get("/")
+# ✅ Health check route for GET and HEAD requests
+@app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "alive"}
 
-# Local run
+# For local testing
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=10000)
