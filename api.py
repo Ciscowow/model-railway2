@@ -12,10 +12,10 @@ from tensorflow.keras.models import load_model, Model
 import uvicorn
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-cnn_name              = "MobileNetV2"
-h5_model_path         = f"{cnn_name}_steno_model.h5"
-pkl_path              = f"{cnn_name}_embeddings_and_indices.pkl"
-VALIDATION_THRESHOLD  = 0.95  # 95%
+cnn_name             = "MobileNetV2"
+h5_model_path        = f"{cnn_name}_steno_model.h5"
+pkl_path             = f"{cnn_name}_embeddings_and_indices.pkl"
+VALIDATION_THRESHOLD = 0.95  # 95%
 
 equivalents = {
     "a": ["a", "an"], "an": ["a", "an"],
@@ -91,6 +91,7 @@ class PredictionRequest(BaseModel):
 class PredictionResponse(BaseModel):
     predicted_word: str
     accuracy: float
+    correctness: str
 
 # ─── SINGLE-IMAGE ENDPOINT ─────────────────────────────────────────────────────
 @app.post("/predict", response_model=PredictionResponse)
@@ -109,24 +110,18 @@ def predict(payload: PredictionRequest):
             if score > best_score:
                 best_score, best_label = score, rec["label"]
 
-        # 3) validate against threshold + expected_word
-        if best_score >= VALIDATION_THRESHOLD and \
-           is_equivalent(payload.expected_word.lower(), best_label.lower()):
-            return {
-                "predicted_word": best_label,
-                "accuracy":      round(best_score, 4),
-            }
-        else:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"No high-confidence match for '{payload.expected_word}' "
-                    f"(best was '{best_label}' @ {best_score:.4f})"
-                )
-            )
+        # 3) determine correctness
+        match_expected = is_equivalent(payload.expected_word.lower(), best_label.lower())
+        meets_threshold = best_score >= VALIDATION_THRESHOLD
 
-    except HTTPException:
-        raise
+        correctness_str = "Correct" if (match_expected and meets_threshold) else "Incorrect"
+
+        return {
+            "predicted_word": best_label,
+            "accuracy":      round(best_score, 4),
+            "correctness":   correctness_str
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
