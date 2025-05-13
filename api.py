@@ -1,6 +1,7 @@
 import base64
 import io
 import pickle
+import os
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -11,9 +12,10 @@ from tensorflow.keras.models import load_model, Model
 import uvicorn
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-cnn_name      = "MobileNetV2"
-h5_model_path = f"{cnn_name}_steno_model.h5"
-pkl_path      = f"{cnn_name}_embeddings_and_indices.pkl"
+cnn_name              = "MobileNetV2"
+h5_model_path         = f"{cnn_name}_steno_model.h5"
+pkl_path              = f"{cnn_name}_embeddings_and_indices.pkl"
+VALIDATION_THRESHOLD  = 0.95  # 95%
 
 equivalents = {
     "a": ["a", "an"], "an": ["a", "an"],
@@ -81,35 +83,50 @@ emb_model = Model(inputs=model.inputs, outputs=model.get_layer("embedding_layer"
 with open(pkl_path, "rb") as f:
     records = pickle.load(f)["records"]
 
-# ─── REQUEST MODEL ──────────────────────────────────────────────────────────────
+# ─── REQUEST & RESPONSE MODELS ─────────────────────────────────────────────────
 class PredictionRequest(BaseModel):
     image: str
     expected_word: str
 
+class PredictionResponse(BaseModel):
+    predicted_word: str
+    accuracy: float
+
 # ─── SINGLE-IMAGE ENDPOINT ─────────────────────────────────────────────────────
-@app.post("/predict")
+@app.post("/predict", response_model=PredictionResponse)
 def predict(payload: PredictionRequest):
     try:
-        x = load_from_base64(payload.image)
-        emb_q = emb_model.predict(x, verbose=0)[0]
+        # 1) preprocess + embed
+        x       = load_from_base64(payload.image)
+        emb_q   = emb_model.predict(x, verbose=0)[0]
         emb_q_n = l2_normalize(emb_q)
 
-        # find best match
+        # 2) find best match
         best_score = -1.0
-        best_label = None
+        best_label = ""
         for rec in records:
             score = float(np.dot(emb_q_n, rec["emb"]))
             if score > best_score:
                 best_score, best_label = score, rec["label"]
 
-        correctness = is_equivalent(payload.expected_word.lower(), best_label.lower())
+        # 3) validate against threshold + expected_word
+        if best_score >= VALIDATION_THRESHOLD and \
+           is_equivalent(payload.expected_word.lower(), best_label.lower()):
+            return {
+                "predicted_word": best_label,
+                "accuracy":      round(best_score, 4),
+            }
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"No high-confidence match for '{payload.expected_word}' "
+                    f"(best was '{best_label}' @ {best_score:.4f})"
+                )
+            )
 
-        return {
-            "predicted_word": best_label,
-            "accuracy": round(best_score, 4),
-            "correctness": correctness
-        }
-
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
