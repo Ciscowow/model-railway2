@@ -7,6 +7,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 from PIL import Image
 from tensorflow.keras.models import load_model, Model
 import uvicorn
@@ -70,10 +71,8 @@ def l2_normalize(vec: np.ndarray) -> np.ndarray:
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"],    allow_headers=["*"],
 )
 
 # ─── LOAD MODEL & RECORDS ───────────────────────────────────────────────────────
@@ -94,9 +93,14 @@ class PredictionResponse(BaseModel):
     expected_word: str
     detected_word: str
     accuracy: float
+    reason: Optional[str] = None
 
 # ─── PREDICT ENDPOINT ──────────────────────────────────────────────────────────
-@app.post("/predict", response_model=PredictionResponse)
+@app.post(
+    "/predict",
+    response_model=PredictionResponse,
+    response_model_exclude_none=True
+)
 def predict(payload: PredictionRequest):
     try:
         # 1) preprocess + embed
@@ -104,38 +108,42 @@ def predict(payload: PredictionRequest):
         emb_q   = emb_model.predict(x, verbose=0)[0]
         emb_q_n = l2_normalize(emb_q)
 
-        # 2) compute similarities
-        sims = [(float(np.dot(emb_q_n, rec["emb"])), rec["label"])
-                for rec in records]
-        sims.sort(key=lambda x: x[0], reverse=True)
+        # 2) compute similarities and get top-1
+        best_score = -1.0
+        best_label = ""
+        for rec in records:
+            score = float(np.dot(emb_q_n, rec["emb"]))
+            if score > best_score:
+                best_score, best_label = score, rec["label"]
 
-        # 3) look for expected_word in top-5 above threshold
-        top5      = sims[:5]
-        exp_lower = payload.expected_word.lower()
-        exp_score = next(
-            (score for score, lbl in top5
-             if lbl.lower() == exp_lower and score >= VALIDATION_THRESHOLD),
-            None
+        accuracy_pct = round(best_score * 100, 2)
+        exp_lower    = payload.expected_word.lower()
+        detected     = best_label
+        correct      = (
+            best_score >= VALIDATION_THRESHOLD and
+            is_equivalent(exp_lower, detected.lower())
         )
 
-        if exp_score is not None:
-            # expected was confidently detected
-            detected = payload.expected_word
-            accuracy = exp_score
-            correct  = True
-        else:
-            # fallback to raw Top-1
-            best_score, best_label = sims[0]
-            detected  = best_label
-            accuracy  = best_score
-            correct   = (best_label.lower() == exp_lower
-                         and best_score >= VALIDATION_THRESHOLD)
+        # 3) build response
+        reason = None
+        if not correct:
+            if best_score < VALIDATION_THRESHOLD:
+                reason = (
+                    f"Expected '{payload.expected_word}' scored "
+                    f"{accuracy_pct}%, below the {int(VALIDATION_THRESHOLD*100)}% threshold"
+                )
+            else:
+                reason = (
+                    f"Detected '{best_label}' instead of "
+                    f"expected '{payload.expected_word}'"
+                )
 
         return {
             "correctness":   "Correct" if correct else "Incorrect",
             "expected_word": payload.expected_word,
             "detected_word": detected,
-            "accuracy":      round(accuracy, 4)
+            "accuracy":      round(best_score, 4),
+            "reason":        reason
         }
 
     except Exception as e:
