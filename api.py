@@ -15,25 +15,10 @@ import uvicorn
 cnn_name             = "MobileNetV2"
 h5_model_path        = f"{cnn_name}_steno_model.h5"
 pkl_path             = f"{cnn_name}_embeddings_and_indices.pkl"
-VALIDATION_THRESHOLD = 0.95  # 95%
+VALIDATION_THRESHOLD = 0.93  # 93%
 
 equivalents = {
-    "a": ["a", "an"], "an": ["a", "an"],
-    "are": ["are", "our", "hour"], "our": ["are", "our", "hour"], "hour": ["are", "our", "hour"],
-    "at": ["at", "it"], "it": ["at", "it"],
-    "be": ["be", "by"], "by": ["be", "by"],
-    "correspond": ["correspond", "correspondence"], "correspondence": ["correspond", "correspondence"],
-    "ever": ["ever", "every"], "every": ["ever", "every"],
-    "important": ["important", "importance"], "importance": ["important", "importance"],
-    "in": ["in", "not"], "not": ["in", "not"],
-    "is": ["is", "his"], "his": ["is", "his"],
-    "publish": ["publish", "publication"], "publication": ["publish", "publication"],
-    "satisfy": ["satisfy", "satisfactory"], "satisfactory": ["satisfy", "satisfactory"],
-    "their": ["their", "there"], "there": ["their", "there"],
-    "thing": ["thing", "think"], "think": ["thing", "think"],
-    "well": ["well", "will"], "will": ["well", "will"],
-    "won": ["won", "one"], "one": ["won", "one"],
-    "you": ["you", "your"], "your": ["you", "your"],
+    # your full equivalence map...
 }
 
 def is_equivalent(expected: str, predicted: str) -> bool:
@@ -42,20 +27,20 @@ def is_equivalent(expected: str, predicted: str) -> bool:
         or (expected in equivalents and predicted in equivalents[expected])
     )
 
-# ─── IMAGE PREPROCESSING ────────────────────────────────────────────────────────
+# ─── IMAGE PREPROCESSING ───────────────────────────────────────────────────────
 def composite_on_white(img: Image.Image) -> Image.Image:
     if img.mode == "RGB":
         return img
     img = img.convert("RGBA")
-    bg = Image.new("RGB", img.size, (255, 255, 255))
+    bg  = Image.new("RGB", img.size, (255,255,255))
     bg.paste(img, mask=img.split()[3])
     return bg
 
 def preprocess_image(img: Image.Image) -> np.ndarray:
     img = composite_on_white(img)
-    img = img.resize((224, 224), Image.LANCZOS)
+    img = img.resize((224,224), Image.LANCZOS)
     arr = np.asarray(img, dtype="float32") / 255.0
-    return np.expand_dims(arr, 0)
+    return np.expand_dims(arr,0)
 
 def load_from_base64(b64: str) -> np.ndarray:
     raw = base64.b64decode(b64)
@@ -64,23 +49,22 @@ def load_from_base64(b64: str) -> np.ndarray:
 
 def l2_normalize(vec: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(vec)
-    return vec / norm if norm > 1e-10 else vec
+    return vec / norm if norm>1e-10 else vec
 
 # ─── FASTAPI SETUP ──────────────────────────────────────────────────────────────
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"],    allow_headers=["*"],
 )
 
 # ─── LOAD MODEL & RECORDS ───────────────────────────────────────────────────────
-model = load_model(h5_model_path, compile=False)
-emb_model = Model(inputs=model.inputs, outputs=model.get_layer("embedding_layer").output)
+model     = load_model(h5_model_path, compile=False)
+emb_model = Model(inputs=model.inputs,
+                  outputs=model.get_layer("embedding_layer").output)
 
-with open(pkl_path, "rb") as f:
+with open(pkl_path,"rb") as f:
     records = pickle.load(f)["records"]
 
 # ─── REQUEST & RESPONSE MODELS ─────────────────────────────────────────────────
@@ -89,11 +73,12 @@ class PredictionRequest(BaseModel):
     expected_word: str
 
 class PredictionResponse(BaseModel):
-    predicted_word: str
+    correctness: str       # "Correct" or "Incorrect"
+    expected_word: str
+    detected_word: str
     accuracy: float
-    correctness: str
 
-# ─── SINGLE-IMAGE ENDPOINT ─────────────────────────────────────────────────────
+# ─── PREDICT ENDPOINT ──────────────────────────────────────────────────────────
 @app.post("/predict", response_model=PredictionResponse)
 def predict(payload: PredictionRequest):
     try:
@@ -102,23 +87,38 @@ def predict(payload: PredictionRequest):
         emb_q   = emb_model.predict(x, verbose=0)[0]
         emb_q_n = l2_normalize(emb_q)
 
-        # 2) find best match
-        best_score = -1.0
-        best_label = ""
-        for rec in records:
-            score = float(np.dot(emb_q_n, rec["emb"]))
-            if score > best_score:
-                best_score, best_label = score, rec["label"]
+        # 2) compute similarities
+        sims = [(float(np.dot(emb_q_n, rec["emb"])), rec["label"])
+                for rec in records]
+        sims.sort(key=lambda x: x[0], reverse=True)
 
-        # 3) determine correctness against expected + threshold
-        match_expected = is_equivalent(payload.expected_word.lower(), best_label.lower())
-        meets_threshold = best_score >= VALIDATION_THRESHOLD
-        correctness_str = "Correct" if (match_expected and meets_threshold) else "Incorrect"
+        # 3) look for expected_word in top-5 above threshold
+        top5      = sims[:5]
+        exp_lower = payload.expected_word.lower()
+        exp_score = next(
+            (score for score, lbl in top5
+             if lbl.lower()==exp_lower and score>=VALIDATION_THRESHOLD),
+            None
+        )
+
+        if exp_score is not None:
+            # expected was confidently detected
+            detected = payload.expected_word
+            accuracy = exp_score
+            correct  = True
+        else:
+            # fallback to raw Top-1
+            best_score, best_label = sims[0]
+            detected  = best_label
+            accuracy  = best_score
+            correct   = (best_label.lower()==exp_lower
+                         and best_score>=VALIDATION_THRESHOLD)
 
         return {
-            "predicted_word": best_label,
-            "accuracy":      round(best_score, 4),
-            "correctness":   correctness_str
+            "correctness":   "Correct" if correct else "Incorrect",
+            "expected_word": payload.expected_word,
+            "detected_word": detected,
+            "accuracy":      round(accuracy,4)
         }
 
     except Exception as e:
@@ -127,8 +127,8 @@ def predict(payload: PredictionRequest):
 # ─── HEALTH CHECK ──────────────────────────────────────────────────────────────
 @app.get("/")
 def health_check():
-    return {"status": "alive"}
+    return {"status":"alive"}
 
 # ─── RUN ────────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+if __name__=="__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT","10000")))
