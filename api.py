@@ -110,10 +110,9 @@ def predict(payload: PredictionRequest):
             if score > best_score:
                 best_score, best_label = score, rec["label"]
 
-        # 3) determine correctness
+        # 3) determine correctness against expected + threshold
         match_expected = is_equivalent(payload.expected_word.lower(), best_label.lower())
         meets_threshold = best_score >= VALIDATION_THRESHOLD
-
         correctness_str = "Correct" if (match_expected and meets_threshold) else "Incorrect"
 
         return {
