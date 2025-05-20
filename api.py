@@ -108,42 +108,42 @@ def predict(payload: PredictionRequest):
         emb_q   = emb_model.predict(x, verbose=0)[0]
         emb_q_n = l2_normalize(emb_q)
 
-        # 2) compute similarities and get top-1
-        best_score = -1.0
-        best_label = ""
-        for rec in records:
-            score = float(np.dot(emb_q_n, rec["emb"]))
-            if score > best_score:
-                best_score, best_label = score, rec["label"]
+        exp_lower = payload.expected_word.lower()
+
+        # 2) find record(s) matching expected word or equivalents
+        matched_records = [rec for rec in records if is_equivalent(exp_lower, rec["label"].lower())]
+
+        if not matched_records:
+            # no embeddings found for expected word
+            return {
+                "correctness": "Incorrect",
+                "expected_word": payload.expected_word,
+                "detected_word": "",
+                "accuracy": 0.0,
+                "reason": f"No embeddings found for expected word '{payload.expected_word}'."
+            }
+
+        # 3) compute similarity only for matched records and take highest score
+        scores = [float(np.dot(emb_q_n, rec["emb"])) for rec in matched_records]
+        best_score = max(scores)
+        detected = matched_records[scores.index(best_score)]["label"]
 
         accuracy_pct = round(best_score * 100, 2)
-        exp_lower    = payload.expected_word.lower()
-        detected     = best_label
-        correct      = (
-            best_score >= VALIDATION_THRESHOLD and
-            is_equivalent(exp_lower, detected.lower())
-        )
+        correct = best_score >= VALIDATION_THRESHOLD
 
-        # 3) build response
         reason = None
         if not correct:
-            if best_score < VALIDATION_THRESHOLD:
-                reason = (
-                    f"Expected '{payload.expected_word}' scored "
-                    f"{accuracy_pct}%, below the {int(VALIDATION_THRESHOLD*100)}% threshold"
-                )
-            else:
-                reason = (
-                    f"Detected '{best_label}' instead of "
-                    f"expected '{payload.expected_word}'"
-                )
+            reason = (
+                f"Expected '{payload.expected_word}' scored "
+                f"{accuracy_pct}%, below the {int(VALIDATION_THRESHOLD*100)}% threshold"
+            )
 
         return {
-            "correctness":   "Correct" if correct else "Incorrect",
+            "correctness": "Correct" if correct else "Incorrect",
             "expected_word": payload.expected_word,
             "detected_word": detected,
-            "accuracy":      round(best_score, 4),
-            "reason":        reason
+            "accuracy": round(best_score, 4),
+            "reason": reason
         }
 
     except Exception as e:
