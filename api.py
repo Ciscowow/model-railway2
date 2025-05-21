@@ -156,6 +156,10 @@ def predict(payload: PredictionRequest):
 def health_check():
     return {"status": "alive"}
 
+@app.head("/")
+def health_check_head():
+    return {"status": "alive"}
+
 # ─── RUN ────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
