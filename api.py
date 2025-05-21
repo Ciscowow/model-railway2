@@ -11,6 +11,7 @@ from typing import Optional
 from PIL import Image
 from tensorflow.keras.models import load_model, Model
 import uvicorn
+from functools import lru_cache
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 cnn_name             = "MobileNetV2"
@@ -75,13 +76,16 @@ app.add_middleware(
     allow_methods=["*"],    allow_headers=["*"],
 )
 
-# ─── LOAD MODEL & RECORDS ───────────────────────────────────────────────────────
-model     = load_model(h5_model_path, compile=False)
-emb_model = Model(inputs=model.inputs,
-                  outputs=model.get_layer("embedding_layer").output)
+# ─── LAZY LOADERS ───────────────────────────────────────────────────────────────
+@lru_cache(maxsize=1)
+def get_embedding_model():
+    model = load_model(h5_model_path, compile=False)
+    return Model(inputs=model.inputs, outputs=model.get_layer("embedding_layer").output)
 
-with open(pkl_path, "rb") as f:
-    records = pickle.load(f)["records"]
+@lru_cache(maxsize=1)
+def get_records():
+    with open(pkl_path, "rb") as f:
+        return pickle.load(f)["records"]
 
 # ─── REQUEST & RESPONSE MODELS ─────────────────────────────────────────────────
 class PredictionRequest(BaseModel):
@@ -103,18 +107,17 @@ class PredictionResponse(BaseModel):
 )
 def predict(payload: PredictionRequest):
     try:
-        # 1) preprocess + embed
         x       = load_from_base64(payload.image)
-        emb_q   = emb_model.predict(x, verbose=0)[0]
+        emb_q   = get_embedding_model().predict(x, verbose=0)[0]
         emb_q_n = l2_normalize(emb_q)
 
         exp_lower = payload.expected_word.lower()
-
-        # 2) find record(s) matching expected word or equivalents
-        matched_records = [rec for rec in records if is_equivalent(exp_lower, rec["label"].lower())]
+        matched_records = [
+            rec for rec in get_records()
+            if is_equivalent(exp_lower, rec["label"].lower())
+        ]
 
         if not matched_records:
-            # no embeddings found for expected word
             return {
                 "correctness": "Incorrect",
                 "expected_word": payload.expected_word,
@@ -123,7 +126,6 @@ def predict(payload: PredictionRequest):
                 "reason": f"No embeddings found for expected word '{payload.expected_word}'."
             }
 
-        # 3) compute similarity only for matched records and take highest score
         scores = [float(np.dot(emb_q_n, rec["emb"])) for rec in matched_records]
         best_score = max(scores)
         detected = matched_records[scores.index(best_score)]["label"]
