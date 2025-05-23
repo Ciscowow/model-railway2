@@ -11,7 +11,6 @@ from typing import Optional
 from PIL import Image
 from tensorflow.keras.models import load_model, Model
 import uvicorn
-from functools import lru_cache
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 cnn_name             = "MobileNetV2"
@@ -73,19 +72,27 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"],    allow_headers=["*"],
+    allow_methods=["*"], allow_headers=["*"],
 )
 
-# ─── LAZY LOADERS ───────────────────────────────────────────────────────────────
-@lru_cache(maxsize=1)
-def get_embedding_model():
-    model = load_model(h5_model_path, compile=False)
-    return Model(inputs=model.inputs, outputs=model.get_layer("embedding_layer").output)
+# ─── GLOBAL OBJECTS ─────────────────────────────────────────────────────────────
+embedding_model: Model = None
+records: list = []
 
-@lru_cache(maxsize=1)
-def get_records():
+# ─── STARTUP EVENT ──────────────────────────────────────────────────────────────
+@app.on_event("startup")
+def load_model_and_records():
+    global embedding_model, records
+    print("[Startup] Loading model...")
+    embedding_model_raw = load_model(h5_model_path, compile=False)
+    embedding_model = Model(
+        inputs=embedding_model_raw.inputs,
+        outputs=embedding_model_raw.get_layer("embedding_layer").output
+    )
+    print("[Startup] Loading records...")
     with open(pkl_path, "rb") as f:
-        return pickle.load(f)["records"]
+        records = pickle.load(f)["records"]
+    print("[Startup] Finished loading.")
 
 # ─── REQUEST & RESPONSE MODELS ─────────────────────────────────────────────────
 class PredictionRequest(BaseModel):
@@ -100,22 +107,15 @@ class PredictionResponse(BaseModel):
     reason: Optional[str] = None
 
 # ─── PREDICT ENDPOINT ──────────────────────────────────────────────────────────
-@app.post(
-    "/predict",
-    response_model=PredictionResponse,
-    response_model_exclude_none=True
-)
+@app.post("/predict", response_model=PredictionResponse, response_model_exclude_none=True)
 def predict(payload: PredictionRequest):
     try:
-        x       = load_from_base64(payload.image)
-        emb_q   = get_embedding_model().predict(x, verbose=0)[0]
+        x = load_from_base64(payload.image)
+        emb_q = embedding_model.predict(x, verbose=0)[0]
         emb_q_n = l2_normalize(emb_q)
 
         exp_lower = payload.expected_word.lower()
-        matched_records = [
-            rec for rec in get_records()
-            if is_equivalent(exp_lower, rec["label"].lower())
-        ]
+        matched_records = [rec for rec in records if is_equivalent(exp_lower, rec["label"].lower())]
 
         if not matched_records:
             return {
