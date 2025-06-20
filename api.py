@@ -53,10 +53,26 @@ def composite_on_white(img: Image.Image) -> Image.Image:
     return bg
 
 def preprocess_image(img: Image.Image) -> np.ndarray:
-    img = composite_on_white(img)
-    img = img.resize((224, 224), Image.LANCZOS)
-    arr = np.asarray(img, dtype="float32") / 255.0
-    return np.expand_dims(arr, 0)
+    img = composite_on_white(img).convert("L")  # grayscale for cropping
+
+    # Auto-crop to drawing content
+    bbox = img.getbbox()
+    if bbox:
+        img = img.crop(bbox)
+
+    # Pad to square with white background
+    w, h = img.size
+    max_side = max(w, h)
+    padded = Image.new("L", (max_side, max_side), color=255)
+    padded.paste(img, ((max_side - w) // 2, (max_side - h) // 2))
+
+    # Resize to 224×224 as required by the model
+    final = padded.resize((224, 224), Image.LANCZOS)
+
+    # Convert to RGB array and normalize
+    arr = np.asarray(final, dtype="float32") / 255.0
+    arr_rgb = np.stack([arr] * 3, axis=-1)
+    return np.expand_dims(arr_rgb, 0)
 
 def load_from_base64(b64: str) -> np.ndarray:
     raw = base64.b64decode(b64)
@@ -137,7 +153,7 @@ def predict(payload: PredictionRequest):
         if not correct:
             reason = (
                 f"Expected '{payload.expected_word}' scored "
-                f"{accuracy_pct}%, below the {int(VALIDATION_THRESHOLD*100)}% threshold"
+                f"{accuracy_pct}%, below the {int(VALIDATION_THRESHOLD * 100)}% threshold"
             )
 
         return {
